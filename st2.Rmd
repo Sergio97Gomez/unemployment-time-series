@@ -1,0 +1,397 @@
+---
+title: "Taller 2"
+author: "Serio Gomez"
+date: "2025-11-24"
+output: html_document
+---
+
+
+# INTRODUCCION DE LOS DATOS UTILIZADOS
+## 1.Introducción de los datos utilizados, exploración de los datos
+
+La serie analizada corresponde a la tasa de desempleo total nacional de Colombia, publicada por el Banco de la República con información proveniente del DANE. La variable está expresada en porcentaje (%) y mide la proporción de la población económicamente activa (PEA) que se encuentra desempleada. Los datos tienen frecuencia mensual y cubren el periodo desde enero de 2001 hasta agosto de 2025, para un total de 296 observaciones.
+
+
+```{r setup, include=FALSE}
+# --- 1. CARGA Y PREPARACIÓN DE LOS DATOS ---
+# Cargar librerías necesarias
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(tseries)
+library(kableExtra)
+library(gridExtra)     
+library(FinTS)         #
+library(tinytex)
+library(lmtest)
+Datos_desempleo <- read.csv2("C:/Users/gomez/Downloads/Mercado laboral y población.csv")
+
+# Convertir las fechas
+Datos_desempleo$Fecha <- as.Date(Datos_desempleo$Periodo.MMM..AAAA., format="%d/%m/%Y")
+Datos_desempleo <- Datos_desempleo[order(Datos_desempleo$Fecha), ]
+
+# Crear serie ts
+ts_desempleo <- ts(
+  Datos_desempleo$Tasa.de.desempleo...total.nacional,
+  start = c(
+    as.numeric(format(min(Datos_desempleo$Fecha), "%Y")),
+    as.numeric(format(min(Datos_desempleo$Fecha), "%m"))
+  ),
+  frequency = 12
+)
+
+
+```
+
+
+```{r grafico  sumamry, echo=F}
+summary(ts_desempleo)
+
+autoplot(ts_desempleo) +
+  labs(title = "Tasa de desempleo (%) - Serie mensual",
+       y = "Tasa (%)")
+
+```
+
+### Visualizacion inicial de la serie
+
+En la visualización de la serie temporal se observa una tendencia decreciente entre 2001 y 2019, seguida de un incremento abrupto en 2020 asociado a la pandemia de COVID-19, y posteriormente un retorno a niveles más bajos.
+Además de la tendencia, la serie presenta un comportamiento estacional característico de variables laborales mensuales ya que estas variables suelen tener comportamientos particulares de acuerdo al mes del año. Normalmente, los primeros meses del año (enero–febrero) presentan valores relativamente altos por el ajuste posterior al cierre anual, mientras que entre abril y junio se observan descensos asociados a la reactivación productiva. En los últimos meses del año suelen reflejarse disminuciones leves debido a la contratación temporal.
+Este patrón estacional evidente sugiere la pertinencia de utilizar un modelo SARIMA con periodo estacional igual a 12.
+
+### Transformacon BoxCox de la serie para elminar la tendencia
+
+```{r a, echo=FALSE}
+lambda <- BoxCox.lambda(ts_desempleo, method="guerrero")
+lambda
+```
+El valor estimado del parámetro de Box–Cox fue λ = –0.9999, que es prácticamente igual a –1. Esto significa que la serie presenta variaciones en la varianza según el nivel, por lo cual es recomendable aplicar una transformación que estabilice esa variabilidad.
+
+Un valor tan cercano a –1 indica que la transformación adecuada es la transformación recíproca (equivalente a usar BoxCox(y, λ = -1)
+Por lo tanto, en el siguiente paso trabajaré con la serie transformada usando λ = –1.
+
+```{r b, echo=FALSE}
+# Aplicar la transformación BoxCox con lambda ~ -1
+lambda <- -0.9999242
+ts_trans <- BoxCox(ts_desempleo, lambda)
+
+# Gráfica de la serie transformada
+autoplot(ts_trans,
+     main = "Serie transformada (BoxCox λ ≈ -1)",
+     ylab = "Valor transformado",
+     xlab = "Tiempo")
+
+```
+La serie transformada conserva la estructura general de la serie original (tendencia descendente y estacionalidad marcada), pero la variabilidad se observa más homogénea a lo largo del tiempo. Incluso el pico asociado a la pandemia aparece suavizado en comparación con la escala original. Esta estabilidad es conveniente para la identificación y estimación del modelo SARIMA, por lo que a partir de aquí se trabajara con la serie transformada.
+
+
+```{r c, echo=FALSE}
+
+x <- as.numeric(ts_trans)
+
+par(mfrow = c(2,1))
+
+acf(x, lag.max = 60, main = "ACF - Serie transformada")
+pacf(x, lag.max = 60, main = "PACF - Serie transformada")
+
+par(mfrow = c(1,1))
+
+```
+
+## 2. Identificación del modelo
+
+Para determinar la estructura del modelo SARIMA, primero se revisaron las funciones ACF y PACF de la serie transformada. En la ACF se nota que las autocorrelaciones tiene decaimiento lento , lo cual indica que la serie todavía no es estacionaria. También aparece un pico marcado en el rezago 12, que coincide con el ciclo anual. Este comportamiento sugiere que es necesario aplicar tanto una diferenciación ordinaria como una diferenciación estacional.
+
+La PACF muestra un pico claro en el rezago 1 y otros picos más pequeños en rezagos cercanos, lo que refleja cierta dependencia de corto plazo que puede modelarse mediante un término autorregresivo. En conjunto, la lectura de ambas funciones apunta a trabajar con una diferenciación ordinaria de primer orden \( d = 1 \) y una diferenciación estacional de primer orden \( D = 1 \), con un periodo estacional \( s = 12 \).
+
+Además, el pico estacional visible en la ACF es típico de un componente estacional de tipo MA en el modelo. Por su parte, la PACF no muestra impulsos importantes en rezagos estacionales, por lo que no parece necesario incluir un término AR estacional.
+
+Con base en estas observaciones, se plantean dos modelos candidatos que se ajustan de manera coherente a lo que muestran la ACF y la PACF:
+
+1. **Modelo A: \( \text{SARIMA}(0,1,1)(0,1,1)_{12} \)**  
+   Este modelo incluye un término MA no estacional y un MA estacional, lo cual responde directamente a los patrones observados en la ACF.
+
+2. **Modelo B: \( \text{SARIMA}(1,1,0)(0,1,1)_{12} \)**  
+   Añade un término AR de primer orden para capturar la dependencia inmediata señalada por la PACF, manteniendo el componente estacional MA.
+
+Estos dos modelos representan alternativas  para continuar con la etapa de estimación.
+
+
+
+```{r d, echo=FALSE}
+# --- 3. ESTIMACIÓN DE LOS MODELOS SARIMA ---
+
+# Modelo A: SARIMA(0,1,1)(0,1,1)[12]
+modeloA <- Arima(ts_trans,
+                 order    = c(0,1,1),
+                 seasonal = c(0,1,1))
+
+summary(modeloA)
+
+# Modelo B: SARIMA(1,1,0)(0,1,1)[12]
+modeloB <- Arima(ts_trans,
+                 order    = c(1,1,0),
+                 seasonal = c(0,1,1))
+
+summary(modeloB)
+
+
+```
+## 3. Estimación de los modelos SARIMA
+
+A partir de los modelos candidatos seleccionados en la etapa de identificación,se estimaron los modelos SARIMA(0,1,1)(0,1,1)[12] y SARIMA(1,1,0)(0,1,1)[12]
+utilizando la serie transformada mediante Box–Cox (λ ≈ -1).
+
+---
+
+### Modelo A: SARIMA(0,1,1)(0,1,1)[12]
+
+La ecuación del modelo estimado es:
+
+(1 - B)(1 - B^12) y_t = (1 - 0.2809 B)(1 - 0.7789 B^12) ε_t
+
+Los coeficientes estimados fueron:
+
+- ma1 = -0.2809 (s.e. = 0.0616)
+- sma1 = -0.7789 (s.e. = 0.0583)
+
+Ambos coeficientes son altamente significativos, lo que confirma la presencia de un
+componente MA de corto plazo y un componente MA estacional fuerte.
+
+El modelo presenta:
+
+- σ² residual = 2.934 × 10^{-5}
+- logLik = 1070.75
+- AIC = -2135.51
+- BIC = -2124.57
+
+Errores en la muestra:
+
+- RMSE = 0.00528
+- MAE  = 0.00387
+- MAPE = 0.425%
+
+Estos resultados indican un ajuste muy adecuado.
+
+---
+
+### Modelo B: SARIMA(1,1,0)(0,1,1)[12]
+
+La ecuación del modelo estimado es:
+
+(1 + 0.2472 B)(1 - B)(1 - B^12) y_t = (1 - 0.7818 B^12) ε_t
+
+Coeficientes estimados:
+
+- ar1  = -0.2472 (s.e. = 0.0577)
+- sma1 = -0.7818 (s.e. = 0.0573)
+
+Ambos coeficientes son significativos, lo que valida la presencia
+de un componente AR(1) y un MA estacional.
+
+El modelo presenta:
+
+- σ² residual = 2.953 × 10^{-5}
+- logLik = 1069.82
+- AIC = -2133.64
+- BIC = -2122.70
+
+Errores en la muestra:
+
+- RMSE = 0.00529
+- MAE  = 0.00391
+- MAPE = 0.430%
+
+---
+
+### Comparación entre modelos
+
+El Modelo A presenta:
+
+- menor AIC y BIC
+- menor varianza residual
+- menores errores in-sample
+
+Por lo tanto, el Modelo A ofrece mejor desempeño en la etapa de estimación.
+
+
+
+
+```{r e, echo=FALSE}
+# --- 4. VALIDACIÓN DE LOS MODELOS ---
+
+# Residuales de cada modelo
+resA <- residuals(modeloA)  # SARIMA(0,1,1)(0,1,1)[12]
+resB <- residuals(modeloB)  # SARIMA(1,1,0)(0,1,1)[12]
+
+# ACF y PACF de los residuales
+par(mfrow = c(2,2))
+acf(resA, main = "ACF Residuales - Modelo A")
+pacf(resA, main = "PACF Residuales - Modelo A")
+acf(resB, main = "ACF Residuales - Modelo B")
+pacf(resB, main = "PACF Residuales - Modelo B")
+par(mfrow = c(1,1))
+
+# Pruebas Ljung–Box en rezagos relevantes (12 y 24)
+cat("Modelo A - Ljung Box lag 12:\n")
+print(Box.test(resA, lag = 12, type = "Ljung-Box"))
+cat("\nModelo A - Ljung Box lag 24:\n")
+print(Box.test(resA, lag = 24, type = "Ljung-Box"))
+
+cat("\nModelo B - Ljung Box lag 12:\n")
+print(Box.test(resB, lag = 12, type = "Ljung-Box"))
+cat("\nModelo B - Ljung Box lag 24:\n")
+print(Box.test(resB, lag = 24, type = "Ljung-Box"))
+
+# Histogramas y QQ-plot para evaluar normalidad
+par(mfrow = c(2,2))
+hist(resA, main = "Histograma Residuales - Modelo A")
+qqnorm(resA); qqline(resA)
+
+hist(resB, main = "Histograma Residuales - Modelo B")
+qqnorm(resB); qqline(resB)
+par(mfrow = c(1,1))
+
+```
+
+## 4. Validación de los modelos
+
+Una vez estimados los modelos SARIMA(0,1,1)(0,1,1)\(_{12}\) y SARIMA(1,1,0)(0,1,1)\(_{12}\), se analizan sus residuales para verificar si cumplen con las condiciones básicas que debe tener un modelo correctamente especificado: ausencia de autocorrelación, comportamiento aproximadamente normal y varianza estable.
+
+Para cada modelo se calcularon los residuales y se evaluaron mediante gráficos ACF/PACF, histogramas, QQ–plots y pruebas Ljung–Box en rezagos relevantes (12 y 24), de modo que se cubran los ciclos estacionales de la serie.
+
+### Modelo A: SARIMA(0,1,1)(0,1,1)\(_{12}\)
+
+Los residuales del Modelo A no presentan patrones evidentes en los gráficos ACF y PACF. No aparece ningún pico significativo, lo que indica que la estructura del modelo logró capturar la mayor parte de la dependencia temporal. Los histogramas muestran una distribución aproximadamente simétrica, y aunque los QQ–plots exhiben algunas desviaciones en las colas, no se observan distorsiones importantes.
+
+Las pruebas Ljung–Box confirman la ausencia de autocorrelación remanente.  
+Los resultados fueron:
+
+- **Ljung–Box (lag 12):** \(p = 0.5526\)  
+- **Ljung–Box (lag 24):** \(p = 0.4515\)
+
+En ambos casos el p-valor es bastante mayor que 0.05, por lo que no se rechaza la hipótesis nula de independencia. Esto sugiere que los residuales del modelo pueden considerarse ruido blanco.
+
+### Modelo B: SARIMA(1,1,0)(0,1,1)\(_{12}\)
+
+Para el Modelo B, los gráficos ACF y PACF también muestran un comportamiento aceptable, sin autocorrelaciones relevantes en los primeros rezagos ni en los estacionales. Los histogramas y QQ–plots mantienen un patrón muy similar al del modelo anterior: hay una tendencia hacia la normalidad, aunque con ligeras desviaciones en las colas.
+
+Las pruebas Ljung–Box también indican que no existe autocorrelación significativa:
+
+- **Ljung–Box (lag 12):** \(p = 0.4149\)  
+- **Ljung–Box (lag 24):** \(p = 0.3514\)
+
+Al igual que en el primer modelo, los p-valores son suficientemente altos para concluir que los residuales se comportan como ruido blanco.
+
+#### Conclusión de la validación
+
+Ambos modelos superan las pruebas de diagnóstico: sus residuales no presentan autocorrelación y muestran una forma razonablemente cercana a la normalidad. Esto implica que, desde el punto de vista de validación, **los dos modelos son adecuados** y pueden pasar a la etapa de comparación y selección final.
+
+
+## 5. Selección del modelo
+
+La selección del modelo se realizó comparando los dos modelos estimados en los pasos anteriores:  
+el **SARIMA(0,1,1)(0,1,1)\(_{12}\)** (Modelo A) y el **SARIMA(1,1,0)(0,1,1)\(_{12}\)** (Modelo B).  
+Para escoger el mejor modelo se tuvieron en cuenta tres criterios:
+(i) los criterios de información, (ii) el diagnóstico de residuos y (iii) el desempeño en pronósticos sobre el último año de datos
+
+
+### 5.1 Criterios de información
+
+Los resultados de AIC y BIC fueron:
+
+- **Modelo A:** AIC = –2135.51, BIC = –2124.57  
+- **Modelo B:** AIC = –2133.64, BIC = –2122.70  
+
+En ambos criterios el Modelo A obtiene valores más bajos, lo que indica un mejor compromiso entre ajuste y complejidad. La diferencia no es mucha, pero sí considerable.
+
+### 5.2 Diagnóstico de residuos
+
+Los residuos de ambos modelos se analizaron mediante ACF–PACF, histogramas y QQ-plots, y además se aplicaron pruebas Ljung–Box con rezagos estacionales (12 y 24). Los resultados del Ljung–Box fueron:
+
+- **Modelo A:**  
+  - lag 12: p-value = 0.5526  
+  - lag 24: p-value = 0.4515  
+
+- **Modelo B:**  
+  - lag 12: p-value = 0.4149  
+  - lag 24: p-value = 0.3514  
+
+En los dos modelos los p–values son altos, lo que indica ausencia de autocorrelación significativa en los errores. Sin embargo, el Modelo A tiene valores ligeramente más altos, lo cual sugiere un comportamiento más cercano a ruido blanco.
+
+### 5.3 Comparación mediante pronóstico 
+
+Para evaluar la capacidad predictiva se reservó el último año de observaciones  
+y se generaron pronósticos con cada modelo. Los errores obtenidos fueron:
+
+- **Modelo A:**  
+  - RMSE = 0.008807  
+  - MAE = 0.007332  
+
+- **Modelo B:**  
+  - RMSE = 0.008580  
+  - MAE = 0.007096  
+
+Los resultados muestran algo interesante: aunque el Modelo A es superior en AIC/BIC y presenta mejores residuos, el Modelo B produce errores de pronóstico ligeramente menores en el último año. No obstante, la diferencia entre ambos es muy pequeña, y el desempeño predictivo es bastante parecido.
+
+### 5.4 Elección final
+
+Considerando todas las métricas en conjunto:
+
+- El Modelo A domina en **AIC**, **BIC** y **comportamiento de los residuos**.  
+- El Modelo B es levemente mejor en los errores de pronóstico, pero por una diferencia muy pequeña.  
+
+Debido a que los criterios de información y el diagnóstico residual suelen tener mayor peso en la selección, se concluye que el modelo más adecuado para esta serie es:
+
+### **Modelo seleccionado: SARIMA(0,1,1)(0,1,1)\(_{12}\)**
+
+Este modelo logra un buen equilibrio entre parsimonia, ajuste y estabilidad en los residuos, lo cual lo convierte en la opción más fiable para la fase de pronóstico fuera de muestra.
+
+
+
+
+```{r f, echo=FALSE}
+# --- 6. PRONÓSTICO DEL MODELO SELECCIONADO ---
+
+# Se asume que modeloA es el SARIMA(0,1,1)(0,1,1)[12]
+forecast_A <- forecast(modeloA, h = 12)
+
+# Mostrar resultados numéricos
+forecast_A
+
+# Graficar pronósticos
+autoplot(forecast_A) +
+  labs(title = "Pronóstico 12 meses - Modelo SARIMA(0,1,1)(0,1,1)[12]",
+       y = "Valor transformado",
+       x = "Tiempo")
+
+#  devolver la predicción a la escala original:
+inv_forecast <- InvBoxCox(forecast_A$mean, lambda = -1)
+inv_lower80  <- InvBoxCox(forecast_A$lower[,"80%"], lambda = -1)
+inv_upper80  <- InvBoxCox(forecast_A$upper[,"80%"], lambda = -1)
+inv_lower95  <- InvBoxCox(forecast_A$lower[,"95%"], lambda = -1)
+inv_upper95  <- InvBoxCox(forecast_A$upper[,"95%"], lambda = -1)
+
+# Para ver las predicciones ya destransformadas:
+data.frame(
+  Pronostico = inv_forecast,
+  LI_80 = inv_lower80,
+  LS_80 = inv_upper80,
+  LI_95 = inv_lower95,
+  LS_95 = inv_upper95
+)
+
+```
+
+
+### 6. Pronóstico
+
+Una vez seleccionado el modelo SARIMA(0,1,1)(0,1,1)\(_{12}\) como el más adecuado según los criterios de información, el comportamiento de los residuos y la evaluación , se procede a generar los pronósticos para los siguientes 12 meses. La elección de un horizonte de un año es coherente con la estacionalidad anual de la serie.
+
+El modelo produce predicciones junto con sus intervalos de confianza al 80% y 95%. Estos intervalos permiten cuantificar la incertidumbre asociada al pronóstico y reflejan cómo esta tiende a ampliarse a medida que el horizonte aumenta.
+
+En términos generales, el pronóstico mantiene el patrón de la serie transformada, es decir, conserva la estacionalidad anual y evita oscilaciones abruptas. Después de la transformación inversa correspondiente, la tasa de desempleo tendería a estabilizarse dentro del rango reciente observado, sin presentar cambios bruscos.
+
+El uso del modelo SARIMA(0,1,1)(0,1,1)\(_{12}\) resulta apropiado para producir proyecciones coherentes con la dinámica histórica de la serie, debido a que capta tanto las variaciones de corto plazo como el componente estacional, y genera intervalos razonables que permiten evaluar la precisión del pronóstico.
+

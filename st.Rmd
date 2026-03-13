@@ -1,0 +1,348 @@
+---
+title: "Trabajo 1: Ajuste ARIMA - Tasa de desempleo (Colombia)"
+author: "Sergio Camilo Gómez Muñoz"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: readable
+    highlight: tango
+  pdf_document:
+    toc: true
+---
+
+
+
+
+# INTRODUCCION DE LOS DATOS UTILIZADOS
+
+
+La serie analizada corresponde a la Tasa de desempleo total nacional publicada por el Banco de la República de Colombia, proveniente de información recopilada originalmente por el DANE.Los datos tienen frecuencia mensual, cubriendo el periodo enero de 2001 a agosto de 2025, con un total de 296 observaciones.
+La variable representa el porcentaje de la población económicamente activa (PEA) que se encuentra desempleada, expresada en porcentaje (%). 
+
+El objetivo de este trabajo es **ajustar un modelo ARIMA** que describa el comportamiento temporal del desempleo en Colombia, identificando su tendencia, posibles patrones estacionales y dinámica cíclica, para posteriormente validar la idoneidad del modelo mediante pruebas estadísticas.
+
+
+
+
+
+```{r setup, include=FALSE}
+# --- 1. CARGA Y PREPARACIÓN DE LOS DATOS ---
+# Cargar librerías necesarias
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(tseries)
+library(kableExtra)
+library(gridExtra)     
+library(FinTS)         #
+library(tinytex)
+Datos_desempleo <- read.csv2("C:/Users/gomez/Downloads/Mercado laboral y población.csv")
+
+# Crear nueva base solo con fecha y desempleo
+Desempleo_st <- data.frame(
+  fecha = dmy(Datos_desempleo$Periodo.MMM..AAAA.),
+  Tasa_desempleo = Datos_desempleo$Tasa.de.desempleo...total.nacional
+)
+
+
+
+```
+
+# 1.EXPLORACIÓN DE LOS DATOS
+
+A continuacion se hara un resumen descritivo de la variable.
+```{r grafico-inicial, echo=FALSE, message=FALSE, warning=FALSE}
+# Mostrar estructura y primeras filas
+kable(head(Desempleo_st), caption = "Primeras observaciones de la tasa de desempleo nacional") %>%
+  kable_styling(full_width = FALSE)
+
+kable(summary(Desempleo_st),caption = "1")%>%
+  kable_styling(full_width = FALSE)
+```
+## 1.1 GRÁFICO DE LA SERIE TEMPORAL ORIGINAL
+
+A continuación, se construye la serie temporal mensual de la tasa de desempleo nacional desde enero de 2001 hasta agosto de 2025.
+Esta representación permite observar la evolución general del desempleo a lo largo del tiempo e identificar posibles tendencias de largo plazo y comportamientos estacionales asociados a las variaciones del mercado laboral colombiano.
+
+```{r grafico-serie, message=FALSE, warning=FALSE}
+# Crear serie temporal mensual desde enero de 2001
+ts_desempleo <- ts(Desempleo_st$Tasa_desempleo, start = c(2001, 1), frequency = 12)
+
+
+
+autoplot(ts_desempleo) +
+labs(title = "Tasa de desempleo mensual ",
+x = "Año", y = "Porcentaje de desempleo (%)") +
+theme_minimal()
+
+
+```
+
+
+El gráfico de la tasa de desempleo mensual en Colombia (2001–2025) revela una trayectoria claramente descendente, lo cual indica una tendencia negativa de largo plazo en el desempleo nacional.
+En los primeros años de la serie (2001–2008) se observan niveles persistentemente altos entre el 14 % y 17 % seguidos de una reducción gradual hasta alrededor del 10 % en 2015.
+Posteriormente, la tasa se mantiene relativamente estable, pero presenta un repunte abrupto en 2020, asociado a los efectos económicos de la pandemia de COVID-19, alcanzando valores cercanos al 21 %.
+Desde 2021 en adelante, la serie evidencia una recuperación progresiva del empleo, convergiendo hacia niveles inferiores al 9 % en 2025.
+
+Además, se aprecian fluctuaciones recurrentes dentro de cada año, lo cual sugiere la existencia de un componente estacional relacionado con patrones laborales anuales (por ejemplo, mayor desempleo en comienzos de año y reducciones en los meses de mayor actividad económica).
+
+## 1.2 ACF y PACF
+
+```{r acf-pacf-nivel, fig.height=4, fig.width=8,  message=FALSE, warning=FALSE}
+
+par(mfrow = c(1,2))
+acf(ts_desempleo,lag.max=36, main = "ACF ")
+pacf(ts_desempleo,lag.max=36, main = "PACF ")
+par(mfrow = c(1,1))
+
+```
+
+En la función de autocorrelación (ACF), los coeficientes disminuyen lentamente conforme aumentan los rezagos, manteniéndose significativamente distintos de cero incluso después de varios periodos. Este comportamiento es típico de una serie no estacionaria en media, ya que las observaciones conservan una fuerte dependencia temporal debida a la presencia de una tendencia estocástica.
+
+Por su parte, la función de autocorrelación parcial (PACF) muestra un pico pronunciado en el primer rezago y valores no significativos posteriormente, lo que indica que la relación entre observaciones consecutivas es alta, pero que gran parte de la estructura proviene de la tendencia general de la serie.
+
+En conjunto, la forma de ambas funciones indica que la serie de desempleo no es estacionaria y probablemente requiere una primera diferenciación (d=1) para estabilizar su media e identificar un modelo ARIMA adecuado.
+Además, se observan ligeras oscilaciones en rezagos múltiplos de 12, lo que podría sugerir la presencia de patrones estacionales anuales.
+
+## 1.3 PRUEBA DE RAÍZ UNITARIA
+
+```{r adf_test,  message=FALSE, warning=FALSE}
+# 6. Prueba de raíz unitaria (ADF) en niveles
+adf_nivel <- adf.test(ts_desempleo)
+adf_nivel
+
+
+
+
+```
+
+La prueba Augmented Dickey-Fuller (ADF) aplicada a la serie en niveles arroja un estadístico Dickey-Fuller de −3.1328 con un valor-p = 0.0995, superior al nivel de significancia usual del 5 %.
+Por tanto, no se rechaza la hipótesis nula de existencia de raíz unitaria, concluyéndose que la serie no es estacionaria.
+
+En otras palabras, la tasa de desempleo presenta una dependencia temporal persistente y una varianza no constante, confirmando los resultados obtenidos en la ACF.
+Esto implica que la serie debe transformarse antes de aplicar modelos ARIMA.
+
+
+
+# 2 IDENTIFICACIÓN DEL MODELO
+
+## 2.1 DIFERENCIACIÓN
+
+
+### 2.1.1 Gráficos comparativos
+
+```{r diferencia-adf, fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+# Primera diferencia
+d1_desempleo <- diff(ts_desempleo)
+
+# Gráficas comparativas
+p1 <- autoplot(ts_desempleo) + ggtitle("Nivel: tasa de desempleo") + ylab("%")
+p2 <- autoplot(d1_desempleo) + ggtitle("Primera diferencia (Δ tasa)") + ylab("Δ%")
+grid.arrange(p1, p2, ncol = 1)
+
+
+```
+
+Luego de realizar una primera diferenciación sobre la tasa de desempleo, la nueva serie presenta fluctuaciones más estables alrededor de una media constante, sin evidencia de tendencia. 
+En la inspección visual de la serie diferenciada (Δ tasa), se aprecia un comportamiento que oscila en torno a cero, con algunos picos pronunciados (especialmente hacia 2020), pero sin tendencia a largo plazo. Este comportamiento es característico de una serie estacionaria.
+
+
+### 2.1.2 PRUEBA DE RAÍZ UNITARIA SOBRE LA SERIE DIFERENCIADA
+
+```{r ADF sobre la diferenciada, fig.height=5, fig.width=10,echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+# ADF sobre la diferenciada
+adf_d1 <- adf.test(d1_desempleo)
+adf_d1
+
+
+```
+
+El resultado de la prueba de raíz unitaria de Dickey-Fuller aumentada (ADF) aplicada sobre la serie diferenciada fue el siguiente:
+Dado que el p-valor = 0.01 < 0.05, se rechaza la hipótesis nula de presencia de raíz unitaria.
+Por tanto, se concluye que la serie diferenciada es estacionaria y el grado de diferenciación adecuado para el modelo ARIMA se establece como d=1.
+
+### 2.1.3 ACF Y PACF DE LA SERIE DIFERENCIADA
+
+```{r ACF  PACF de la serie diferenciada, fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+
+
+# ACF / PACF de la serie diferenciada
+par(mfrow = c(1,2))
+acf(d1_desempleo,lag.max=36, main = "ACF - 1ª diferencia")
+pacf(d1_desempleo,lag.max=36, main = "PACF - 1ª diferencia")
+par(mfrow = c(1,1))
+
+
+```
+
+
+
+**ACF**: muestra un pico pronunciado en el primer rezago (lag 1), seguido de una rápida caída, lo que indica una dependencia fuerte pero de corta duración, típica de un componente de media móvil no estacional (MA(1)).
+No obstante, se observan picos adicionales y claramente significativos en los rezagos 12 y 24, lo cual sugiere la existencia de una estructura estacional anual: los valores de desempleo tienden a repetirse con un patrón similar cada 12 meses.
+
+**PACF**: presenta un pico importante en el rezago 1, asociado a un posible componente autorregresivo de primer orden (AR(1)), y evidencia más débil, aunque perceptible, en el rezago 12, lo que refuerza la hipótesis de un componente autorregresivo estacional (P=1).
+
+
+
+## 2.2 MODELOS PROPUESTOS
+
+se proponen los siguientes modelos  para la etapa de estimación:
+
+ARIMA(1,1,0): modelo autorregresivo de primer orden con una diferenciación, que capta la dependencia del valor actual respecto al anterior.
+
+ARIMA(0,1,1): modelo de media móvil de primer orden con una diferenciación, que representa la dependencia de los errores pasados.
+
+ARIMA(1,1,1): modelo mixto que combina ambos componentes y permite capturar tanto la persistencia como el ajuste inmediato a los choques recientes.
+
+Estos tres modelos se evaluarán en la siguiente sección mediante estimación y diagnóstico de residuales, con el fin de determinar cuál describe mejor el comportamiento temporal del desempleo en Colombia.
+
+
+# 3 ESTIMACIÓN DEL MODELO 
+
+```{r estimacion-modelos, message=FALSE, warning=FALSE}
+
+# Estimación de los tres modelos candidatos identificados previamente
+modelo_arima_110 <- arima(ts_desempleo, order = c(1,1,0))
+modelo_arima_011 <- arima(ts_desempleo, order = c(0,1,1))
+modelo_arima_111 <- arima(ts_desempleo, order = c(1,1,1))
+
+# Mostrar los resultados de cada modelo
+modelo_arima_110
+modelo_arima_011
+modelo_arima_111
+
+# Comparación de criterios de información (AIC y BIC)
+aic_valores <- AIC(modelo_arima_110, modelo_arima_011, modelo_arima_111)
+bic_valores <- BIC(modelo_arima_110, modelo_arima_011, modelo_arima_111)
+
+# Crear tabla comparativa
+criterios <- data.frame(
+  Modelo = c("ARIMA(1,1,0)", "ARIMA(0,1,1)", "ARIMA(1,1,1)"),
+  AIC = aic_valores[,2],
+  BIC = bic_valores[,2]
+)
+
+kable(criterios, caption = "Comparación de criterios de información (AIC y BIC) entre modelos ARIMA propuestos") %>%
+  kable_styling(full_width = FALSE, position = "center", bootstrap_options = c("striped", "hover"))
+
+```
+## 3.1 COMPARACIÓN DE MODELOS PROPUESTOS
+
+Los tres modelos estimados muestran coeficientes estadísticamente significativos, aunque con distinto grado de ajuste según los criterios de información. A continuación, se describen las ecuaciones y la interpretación de los parámetros:
+
+**1. Modelo ARIMA(1,1,0):**
+
+\[
+(1 + 0.1160B)(1 - B)Y_t = \varepsilon_t
+\]
+
+El parámetro autorregresivo negativo \((\phi_1 = -0.1160)\) indica una reversión leve a la media: un aumento en la tasa de desempleo tiende a corregirse ligeramente en el siguiente mes.  La magnitud pequeña sugiere que es un efecto débil y de corta duración.
+
+---
+
+**2. Modelo ARIMA(0,1,1):**
+
+\[
+(1 - B)Y_t = (1 - 0.2154B)\varepsilon_t
+\]
+
+El coeficiente de media móvil negativo \((\theta_1 = -0.2154)\) sugiere que los choques aleatorios se compensan parcialmente en el periodo siguiente, suavizando las fluctuaciones de corto plazo.
+
+---
+
+**3. Modelo ARIMA(1,1,1):**
+
+\[
+(1 - 0.5997B)(1 - B)Y_t = (1 - 0.8641B)\varepsilon_t
+\]
+
+El coeficiente autorregresivo positivo \((\phi_1 = 0.5997)\) muestra que los cambios en la tasa de desempleo tienden a mantenerse por algunos meses, es decir, existe cierta persistencia en su comportamiento.Por su parte, el coeficiente de media móvil negativo \((\theta_1 = -0.8641)\)indica que los efectos de los choques recientes se corrigen rápidamente, reduciendo parte de la variación.
+
+---
+
+De acuerdo con los criterios de información (AIC = 967.38; BIC = 978.44), el modelo **ARIMA(1,1,1)** ofrece el mejor desempeño entre las alternativas evaluadas, por lo que se selecciona como el modelo candidato principal para representar la dinámica del desempleo en Colombia.  
+No obstante, su validez dependerá de que los residuales se comporten como un proceso de ruido blanco, lo cual se verificará en la siguiente sección.
+
+
+# 4 VALIDACIÓN DEL MODELO
+
+```{r validacion, echo=FALSE, message=FALSE, warning=FALSE}
+# --- VALIDACIÓN DE LOS RESIDUALES ---
+
+
+## Modelo ARIMA(1,1,0)
+
+cat("---- Validación ARIMA(1,1,0) ----\n")
+autoplot(modelo_arima_110$residuals) +
+labs(title = "Residuales del modelo ARIMA(1,1,0)", x = "Tiempo", y = "Error") +
+theme_minimal()
+
+ggtsdisplay(modelo_arima_110$residuals, main = "ACF y PACF de los residuales (1,1,0)")
+
+Box.test(modelo_arima_110$residuals, lag = 12, fitdf = 1, type = "Ljung-Box")
+
+## Modelo ARIMA(0,1,1)
+
+cat("\n---- Validación ARIMA(0,1,1) ----\n")
+autoplot(modelo_arima_011$residuals) +
+labs(title = "Residuales del modelo ARIMA(0,1,1)", x = "Tiempo", y = "Error") +
+theme_minimal()
+
+ggtsdisplay(modelo_arima_011$residuals, main = "ACF y PACF de los residuales (0,1,1)")
+
+Box.test(modelo_arima_011$residuals, lag = 12, fitdf = 1, type = "Ljung-Box")
+
+## Modelo ARIMA(1,1,1)
+
+cat("\n---- Validación ARIMA(1,1,1) ----\n")
+autoplot(modelo_arima_111$residuals) +
+labs(title = "Residuales del modelo ARIMA(1,1,1)", x = "Tiempo", y = "Error") +
+theme_minimal()
+
+ggtsdisplay(modelo_arima_111$residuals, main = "ACF y PACF de los residuales (1,1,1)")
+
+Box.test(modelo_arima_111$residuals, lag = 12, fitdf = 2, type = "Ljung-Box")
+
+
+```
+
+La validación de los modelos ARIMA estimados se realizó mediante el análisis gráfico y estadístico de los residuales, con el fin de comprobar si estos se comportan como un **proceso de ruido blanco**, es decir, que sean independientes, de media cero, varianza constante y sin autocorrelación significativa.
+
+
+## 4.1 Análisis gráfico
+
+En las gráficas de residuales de los tres modelos (ARIMA(1,1,0), ARIMA(0,1,1) y ARIMA(1,1,1)) se observa que los errores fluctúan alrededor de cero sin mostrar una tendencia sistemática, lo cual sugiere que los modelos capturan adecuadamente la media de la serie.  
+Sin embargo, se evidencian picos de mayor magnitud en torno al año 2020, coincidiendo con el impacto económico de la pandemia de COVID-19, evento que introdujo perturbaciones atípicas en el desempleo.
+
+Los correlogramas de autocorrelación (ACF) y autocorrelación parcial (PACF) muestran que, si bien la mayoría de los coeficientes se encuentran dentro de las bandas de confianza, existen valores significativos en los rezagos 12 y 24, lo que sugiere cierta estructura estacional no capturada completamente por los modelos. Esto indica que los residuales no son completamente independientes.
+
+## 4.2 Prueba de Ljung-Box
+
+Los resultados del test de Ljung-Box para los tres modelos fueron los siguientes:
+
+Modelo	Estadístico X²	gl	p-valor
+ARIMA(1,1,0)	163.86	11	< 0.001
+ARIMA(0,1,1)	160.09	11	< 0.001
+ARIMA(1,1,1)	121.84	10	< 0.001
+
+En todos los casos, el p-valor es menor que 0.05, por lo que se rechaza la hipótesis nula de independencia de los residuales. Esto significa que los errores presentan autocorrelación significativa, especialmente a rezagos múltiplos de 12, lo cual refuerza la evidencia de un componente estacional que los modelos no han captado por completo.
+
+## 4.3 Conclusión
+
+Aunque los modelos ARIMA evaluados capturan adecuadamente la tendencia y parte de la dinámica del desempleo, los residuales no cumplen completamente el supuesto de ruido blanco. En particular, el modelo ARIMA(1,1,1) sigue siendo el que presenta el mejor ajuste (menores AIC y BIC), pero sus residuales muestran dependencia estacional.
+
+# 5 SELECCIÓN DEL MODELO
+
+La selección final del modelo se fundamenta en la comparación de los criterios de información (AIC y BIC), la significancia estadística de los coeficientes estimados y el comportamiento de los residuales. Entre los modelos propuestos, el ARIMA(1,1,1) presentó los valores más bajos de AIC y BIC (AIC = 967.38, BIC = 978.44), lo que indica un mejor equilibrio entre calidad de ajuste y parsimonia frente a los modelos ARIMA(1,1,0) y ARIMA(0,1,1).
+
+En términos de ajuste, este modelo logra capturar adecuadamente la tendencia descendente y las fluctuaciones de corto plazo de la tasa de desempleo. Sin embargo, el análisis de los residuales reveló la presencia de autocorrelación significativa en rezagos de 12 y 24 meses, evidenciando un componente estacional que no es completamente explicado por el modelo. Este comportamiento sugiere que la dinámica del desempleo colombiano incluye patrones anuales que no son recogidos por los modelos ARIMA simples.
+
+En consecuencia, se concluye que el modelo ARIMA(1,1,1) constituye la mejor representación entre las alternativas evaluadas, pues describe de manera satisfactoria la evolución general del desempleo en Colombia durante el periodo 2001–2025. No obstante, su desempeño podría mejorarse mediante la incorporación de un componente estacional (modelo SARIMA).
+
+

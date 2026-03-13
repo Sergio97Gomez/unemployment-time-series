@@ -1,0 +1,398 @@
+---
+title: "Taller 3 – Modelo Estructural"
+author: "Sergio Gomez"
+date: "2025-11-30"
+output: html_document
+---
+
+# Modelo estructural en espacio de estados
+
+En este trabajo se considera un modelo estructural formulado explícitamente en espacio de estados, con el objetivo de descomponer la tasa de desempleo mensual en componentes latentes interpretables. Se hace una representación estándar de modelos estructurales, donde la dinámica del proceso es gobernada por ecuaciones de estado y la observación se expresa como una combinación lineal de dichos estados.
+
+## Formulación general del modelo
+
+
+En este trabajo se estima un modelo estructural en espacio de estados para la tasa de desempleo mensual de Colombia. El modelo se formula explícitamente en su representación matricial y se estima utilizando el filtro y el suavizado de Kalman, con el objetivo de descomponer la serie en una tendencia estocástica con pendiente y una componente estacional anual.
+
+\[
+y_t = F \alpha_t + v_t,
+\qquad v_t \sim N(0, V)
+\]
+
+\[
+\alpha_t = G \alpha_{t-1} + w_t,
+\qquad w_t \sim N(0, W)
+\]
+
+donde:
+- \( y_t \) denota la observación en el tiempo \( t \),
+- \( \alpha_t \) es el vector de estado latente,
+- \( F \) es la matriz de observación,
+- \( G \) es la matriz de transición del estado,
+- \( v_t \) y \( w_t \) son perturbaciones gaussianas no correlacionadas.
+
+---
+
+## Descomposición estructural
+
+La ecuación de observación se define como:
+
+\[
+y_t = \mu_t + S_t + v_t,
+\qquad v_t \sim N(0, \sigma_v^2)
+\]
+
+donde:
+- \( \mu_t \) representa el nivel o tendencia,
+- \( S_t \) representa la componente estacional mensual,
+- \( v_t \) es el componente irregular.
+
+### Dinámica del nivel y la pendiente
+
+El nivel evoluciona de acuerdo con un modelo de tendencia local con pendiente estocástica:
+
+\[
+\mu_t = \mu_{t-1} + \beta_{t-1} + \eta_t,
+\qquad \eta_t \sim N(0, \sigma_\eta^2)
+\]
+
+\[
+\beta_t = \beta_{t-1} + \zeta_t,
+\qquad \zeta_t \sim N(0, \sigma_\zeta^2)
+\]
+
+donde \( \beta_t \) es la pendiente del nivel.
+
+### Dinámica de la estacionalidad
+
+La estacionalidad se modela mediante una restricción de suma cero sobre un ciclo anual completo:
+
+\[
+S_t = - \sum_{j=1}^{11} S_{t-j} + \omega_t,
+\qquad \omega_t \sim N(0, \sigma_\omega^2)
+\]
+
+Esta formulación garantiza que la estacionalidad no introduzca tendencia espuria en la serie.
+
+---
+
+## Vector de estado
+
+El vector de estado se define como:
+
+\[
+\alpha_t =
+\begin{bmatrix}
+\mu_t \\
+\beta_t \\
+S_t \\
+S_{t-1} \\
+\vdots \\
+S_{t-10}
+\end{bmatrix}
+\]
+
+con dimensión 13, incluyendo el nivel, la pendiente y once estados estacionales.
+
+---
+
+## Matrices del modelo
+
+La matriz de observación queda dada por:
+
+\[
+F =
+\begin{bmatrix}
+1 & 0 & 1 & 0 & \cdots & 0
+\end{bmatrix}
+\]
+
+la cual selecciona el nivel y la componente estacional contemporánea.
+
+La matriz de transición \( G \) tiene una estructura por bloques, donde el bloque correspondiente al nivel y la pendiente es:
+
+\[
+\begin{bmatrix}
+1 & 1 \\
+0 & 1
+\end{bmatrix}
+\]
+
+
+---
+
+## Errores y condiciones iniciales
+
+Las perturbaciones del modelo satisfacen:
+
+\[
+v_t \sim N(0, V), \qquad
+w_t \sim N(0, W)
+\]
+
+con:
+
+\[
+W = \mathrm{diag}(\sigma_\eta^2, \sigma_\zeta^2, \sigma_\omega^2, \ldots, \sigma_\omega^2)
+\]
+
+Finalmente, el estado inicial se asume distribuido como:
+
+\[
+\alpha_0 \sim N(m_0, C_0)
+\]
+
+donde \( m_0 \) y \( C_0 \) representan la media y la varianza iniciales del estado.
+
+```{r setup, include=FALSE}
+# --- 1. CARGA Y PREPARACIÓN DE LOS DATOS ---
+# Cargar librerías necesarias
+library(KFAS)
+library(dlm)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(tseries)
+library(kableExtra)
+library(gridExtra)     
+library(FinTS)         #
+library(tinytex)
+library(lmtest)
+Datos_desempleo <- read.csv2("Mercado laboral y población.csv")
+
+
+# Convertir las fechas
+Datos_desempleo$Fecha <- as.Date(Datos_desempleo$Periodo.MMM..AAAA., format="%d/%m/%Y")
+Datos_desempleo <- Datos_desempleo[order(Datos_desempleo$Fecha), ]
+
+# Crear serie ts
+ts_desempleo <- ts(
+  Datos_desempleo$Tasa.de.desempleo...total.nacional,
+  start = c(
+    as.numeric(format(min(Datos_desempleo$Fecha), "%Y")),
+    as.numeric(format(min(Datos_desempleo$Fecha), "%m"))
+  ),
+  frequency = 12
+)
+
+
+```
+
+La serie de tiempo utilizada corresponde a la tasa de desempleo mensual de Colombia entre 2001 y 2025. Se cargaron y ordenaron los datos, y se construyó una serie temporal con frecuencia mensual. La serie original presenta tendencia y estacionalidad marcada, lo que hace apropiada la aplicación de un modelo estructural que permita descomponerla en componentes interpretables.
+
+## Transformación Box--Cox
+
+Antes de especificar el modelo en espacio de estados, se aplica una transformación Box--Cox a la serie observada con el fin de estabilizar la varianza y reducir posibles efectos de heterocedasticidad. Esta transformación resulta conveniente en modelos estructurales, ya que permite trabajar bajo el supuesto de perturbaciones gaussianas con varianza constante.
+
+La serie transformada conserva la estructura de tendencia y estacionalidad presentes en los datos originales, pero presenta una dinámica más homogénea, facilitando la posterior especificación del modelo estructural.
+
+
+
+```{r boxcox, echo=TRUE, warning=FALSE, message=FALSE}
+# Parámetro Box--Cox (estimado previamente)
+lambda <- -0.9999242
+
+# Aplicación de la transformación
+ts_trans <- BoxCox(ts_desempleo, lambda)
+
+# Visualización de la serie transformada
+ts.plot(
+  ts_trans,
+  main = "Serie transformada Box–Cox",
+  ylab = "Valor transformado",
+  col = "darkgrey"
+)
+
+```
+Después de aplicar la transformación Box–Cox, la serie queda más suave, pero conserva la tendencia y la estacionalidad. Se nota claramente la caída del desempleo, el choque del 2020 y la recuperación. Como la estacionalidad sigue fuerte, el modelo estructural parece una buena opción.
+
+
+
+
+```{r l, echo = TRUE, warning = FALSE, message = FALSE}
+library(dlm)
+
+# Dimensión del estado:
+# 1 nivel + 1 pendiente + 11 estacionales = 13
+m <- 13
+
+
+# Matriz de observación F
+
+Ft <- matrix(c(1, 0, 1, rep(0, 10)), nrow = 1)
+
+
+# Matriz de transición G
+
+Gt <- matrix(0, nrow = m, ncol = m)
+
+# Bloque nivel–pendiente
+Gt[1,1] <- 1
+Gt[1,2] <- 1
+Gt[2,2] <- 1
+
+# Bloque estacional
+Gt[3, 3:m] <- -1
+Gt[4:m, 3:(m-1)] <- diag(m-3)
+
+
+# Varianzas
+
+Vt <- 1
+
+Wt <- diag(
+  c(
+    1e-6,  # varianza del nivel
+    1e-6,  # varianza de la pendiente
+    rep(1e-6, m-2)  # varianza estacional
+  )
+)
+
+# Construcción del modelo dlm
+mod_struct <- dlm(
+  FF = Ft,
+  GG = Gt,
+  V  = Vt,
+  W  = Wt,
+  m0 = rep(0, m),
+  C0 = 1e2 * diag(m)
+)
+
+print("Matriz de observación F:")
+print(Ft)
+
+print("Matriz de transición G:")
+print(Gt)
+
+
+```
+
+El modelo estructural se especifica de forma explícita mediante el paquete \texttt{dlm}. El vector de estado tiene dimensión 13 e incluye el nivel, la pendiente y once componentes estacionales.
+
+La matriz de observación se define como
+\[
+F = \begin{bmatrix} 1 & 0 & 1 & 0 & \cdots & 0 \end{bmatrix},
+\]
+lo que implica que la observación depende únicamente del nivel y del componente estacional contemporáneo.
+
+La matriz de transición se construye por bloques. El bloque correspondiente al nivel y la pendiente sigue una dinámica de tendencia local,
+\[
+\begin{bmatrix}
+1 & 1 \\
+0 & 1
+\end{bmatrix},
+\]
+mientras que el bloque estacional implementa la restricción de suma cero mediante una estructura de estructura de desplazamiento sobre once rezagos estacionales.
+
+La varianza de la ecuación de observación se fija en \( V = 1 \). La matriz de varianzas del estado se especifica como una matriz diagonal con valores \(10^{-6}\) para el nivel, la pendiente y cada uno de los componentes estacionales, imponiendo una evolución suave de los estados en el tiempo.
+
+Las condiciones iniciales se fijan con media nula y una varianza inicial difusa, dada por \( C_0 = 100 \cdot I_{13} \).
+
+
+```{r kalman, echo=TRUE, warning=FALSE, message=FALSE}
+# Aplicación del filtro de Kalman
+filtro <- dlmFilter(ts_trans, mod_struct)
+
+# Aplicación del suavizado de Kalman
+suave <- dlmSmooth(ts_trans, mod_struct)# Extraer nivel filtrado y suavizado
+nivel_filtro <- dropFirst(filtro$m)[,1]
+nivel_suave  <- dropFirst(suave$s)[,1]
+
+par(mfrow = c(2,1))
+
+# Serie observada vs nivel filtrado
+ts.plot(
+  ts_trans,
+  col = "darkgrey",
+  main = "Serie observada y nivel filtrado"
+)
+lines(nivel_filtro, lty = "longdash", col = 2)
+
+# Serie observada vs nivel suavizado
+ts.plot(
+  ts_trans,
+  col = "darkgrey",
+  main = "Serie observada y nivel suavizado"
+)
+lines(nivel_suave, lty = "longdash", col = 3)
+
+par(mfrow = c(1,1))
+
+
+```
+
+
+
+
+A partir del modelo especificado, se aplican el filtro y el suavizado de Kalman para estimar el estado latente asociado al nivel de la serie transformada. En los gráficos se presenta la serie observada junto con la estimación del nivel obtenida mediante cada procedimiento.
+
+El nivel filtrado corresponde a la estimación condicional a la información disponible hasta cada período, mientras que el nivel suavizado se obtiene utilizando la información completa de la muestra. En ambos casos, el nivel estimado sigue la evolución general de la serie observada, aunque el suavizado presenta una trayectoria más regular al incorporar observaciones futuras.
+
+
+```{r estacionalidad, echo=TRUE, warning=FALSE, message=FALSE}
+# Extraer estacionalidad (primer estado estacional)
+est_filtro <- dropFirst(filtro$m)[,3]
+est_suave  <- dropFirst(suave$s)[,3]
+
+par(mfrow = c(2,1))
+
+# Estacionalidad filtrada
+ts.plot(
+  est_filtro,
+  main = "Componente estacional filtrada",
+  col = 2
+)
+
+# Estacionalidad suavizada
+ts.plot(
+  est_suave,
+  main = "Componente estacional suavizada",
+  col = 3
+)
+
+par(mfrow = c(1,1))
+
+```
+
+## Comparación entre filtro y suavizado
+
+A partir del modelo estructural especificado, se extrae la componente estacional correspondiente al primer estado estacional del vector de estado. En los gráficos se presentan las estimaciones obtenidas mediante el filtro y el suavizado de Kalman.
+
+La estacionalidad filtrada refleja la estimación condicional a la información disponible hasta cada período y muestra una dinámica inicial más inestable asociada a la fase de arranque del filtro. La estacionalidad suavizada, al utilizar la información completa de la muestra, presenta un patrón periódico más regular, consistente con la estructura estacional impuesta en la especificación del modelo.
+
+```{r a , echo=FALSE}
+par(mfrow = c(1,1))
+
+ts.plot(
+  ts_trans,
+  col = "darkgrey",
+  main = "Filtro vs suavizado (nivel)"
+)
+lines(nivel_filtro, lty = "longdash", col = 2)
+lines(nivel_suave,  lty = "longdash", col = 3)
+
+```
+
+El gráfico compara las estimaciones del nivel obtenidas mediante el filtro y el suavizado de Kalman. Ambas estimaciones siguen la evolución de largo plazo de la serie transformada, pero presentan diferencias claras en términos de suavidad y capacidad de adaptación.
+
+El nivel filtrado responde de manera más inmediata a las variaciones de la serie observada, ya que se estima únicamente con la información disponible hasta cada período. En contraste, el nivel suavizado utiliza la información completa de la muestra, lo que produce una trayectoria más regular y menos afectada por fluctuaciones transitorias.
+
+Estas diferencias reflejan directamente el mecanismo de cada procedimiento: el filtrado proporciona estimaciones en tiempo real, mientras que el suavizado corrige dichas estimaciones incorporando observaciones futuras.
+
+
+```{r ajustada, echo=TRUE, warning=FALSE, message=FALSE}
+y_ajustada <- nivel_suave + est_suave
+
+ts.plot(
+  ts_trans,
+  col = "darkgrey",
+  main = "Serie observada y serie ajustada"
+)
+lines(y_ajustada, lty = "longdash", col = 4)
+```
+
+La figura presenta la comparación entre la serie observada y la serie ajustada obtenida a partir del modelo en espacio de estados, definida como la suma del nivel suavizado y la componente estacional suavizada.
+
+Se observa que la serie ajustada reproduce adecuadamente la dinámica general de la serie observada, capturando tanto la evolución de largo plazo como el patrón estacional recurrente. Las discrepancias entre ambas series corresponden a variaciones de corto plazo que no son explicadas por los componentes sistemáticos del modelo y quedan determinados por el término de error.
+
